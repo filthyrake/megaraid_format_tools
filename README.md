@@ -2,7 +2,7 @@
 
 ## Problem Summary
 
-I purchased two refurb'd Samsung PM1643a SSDs (OEM model: SLM5B-M3R8SS) and installed them in a Dell R740 server with a PERC H330 controller. The drives were previously used in an enterprise storage array (likely Hitachi/HDS or EMC) and formatted with **520-byte sectors** instead of the standard 512-byte sectors.  This made them pretty unusable without flashing my H330 to IT-mode, which would require unacceptable downtime.
+I purchased two refurb'd Samsung PM1643a SSDs (OEM model: SLM5B-M3R8SS) and installed them in a Dell R740 Proxmox server with a PERC H330 controller. The drives were previously used in an enterprise storage array (likely Hitachi/HDS or EMC) and formatted with **520-byte sectors** instead of the standard 512-byte sectors.  This made them pretty unusable without flashing my H330 to IT-mode, which would require unacceptable downtime.
 
 ### Drives Fixed
 | Slot | Serial | Result |
