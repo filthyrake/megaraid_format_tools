@@ -2,7 +2,7 @@
 
 ## Problem Summary
 
-Two Samsung PM1643a SSDs (OEM model: SLM5B-M3R8SS) were installed in a Dell R740 server with a PERC H330 controller. The drives were previously used in an enterprise storage array (likely Hitachi/HDS or EMC) and formatted with **520-byte sectors** instead of the standard 512-byte sectors.
+I purchased two refurb'd Samsung PM1643a SSDs (OEM model: SLM5B-M3R8SS) and installed them in a Dell R740 server with a PERC H330 controller. The drives were previously used in an enterprise storage array (likely Hitachi/HDS or EMC) and formatted with **520-byte sectors** instead of the standard 512-byte sectors.  This made them pretty unusable without flashing my H330 to IT-mode, which would require unacceptable downtime.
 
 ### Drives Fixed
 | Slot | Serial | Result |
@@ -31,7 +31,7 @@ The PERC H330 (and most RAID controllers) only support 512-byte or 4096-byte sec
 
 ## Solution
 
-We discovered that while the PERC H330 won't expose the drive to Linux, **smartctl can communicate with it** via the MegaRAID passthrough IOCTL. We reverse-engineered the IOCTL interface from smartctl's source code and created custom tools to send SCSI commands directly to the drive.
+I discovered that while the PERC H330 won't expose the drive to Linux, **smartctl can communicate with it** via the MegaRAID passthrough IOCTL. So with the help of Claude Code I reverse-engineered the IOCTL interface from smartctl's source code and created custom tools to send SCSI commands directly to the drive.
 
 ### Key Discovery
 The MegaRAID driver (`megaraid_sas`) provides a passthrough interface at `/dev/megaraid_sas_ioctl_node` that allows sending SCSI commands to physical drives, even those marked as "unsupported."
