@@ -1,0 +1,22 @@
+# Compiled binaries
+mega_format512
+mega_modesel
+mega_inquiry
+check_size
+mega_format_v2
+mega_format_debug
+mega_mode
+mega_final
+
+# Object files
+*.o
+
+# Editor files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
