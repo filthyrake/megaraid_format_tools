@@ -27,10 +27,10 @@ jobs:
     
     - name: Build tools
       run: |
-        gcc -o mega_inquiry mega_inquiry.c
-        gcc -o mega_format512 mega_format512.c
-        gcc -o mega_modesel mega_modesel.c
-        gcc -o check_size check_size.c
+        gcc -O2 -Wall -Wextra -o mega_inquiry mega_inquiry.c
+        gcc -O2 -Wall -Wextra -o mega_format512 mega_format512.c
+        gcc -O2 -Wall -Wextra -o mega_modesel mega_modesel.c
+        gcc -O2 -Wall -Wextra -o check_size check_size.c
     
     - name: Test binaries exist
       run: |
@@ -90,7 +90,7 @@ jobs:
           
           ### Usage:
           Download the individual tools or the tar.gz archive containing all tools.
-          Make the tools executable: `chmod +x mega_*`
+          Make the tools executable: `chmod +x mega_inquiry mega_format512 mega_modesel check_size`
           
           See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md) for detailed usage instructions.
         draft: false

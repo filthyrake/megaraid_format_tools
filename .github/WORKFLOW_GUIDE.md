@@ -67,10 +67,10 @@ To test the build locally before pushing:
 sudo apt-get install build-essential
 
 # Build all tools
-gcc -o mega_inquiry mega_inquiry.c
-gcc -o mega_format512 mega_format512.c
-gcc -o mega_modesel mega_modesel.c
-gcc -o check_size check_size.c
+gcc -O2 -Wall -Wextra -o mega_inquiry mega_inquiry.c
+gcc -O2 -Wall -Wextra -o mega_format512 mega_format512.c
+gcc -O2 -Wall -Wextra -o mega_modesel mega_modesel.c
+gcc -O2 -Wall -Wextra -o check_size check_size.c
 
 # Verify binaries
 ls -lh mega_inquiry mega_format512 mega_modesel check_size
