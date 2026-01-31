@@ -1,0 +1,102 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+    
+    - name: Build tools
+      run: |
+        gcc -O2 -Wall -Wextra -o mega_inquiry mega_inquiry.c
+        gcc -O2 -Wall -Wextra -o mega_format512 mega_format512.c
+        gcc -O2 -Wall -Wextra -o mega_modesel mega_modesel.c
+        gcc -O2 -Wall -Wextra -o check_size check_size.c
+    
+    - name: Test binaries exist
+      run: |
+        ls -lh mega_inquiry mega_format512 mega_modesel check_size
+    
+    - name: Create build artifacts archive
+      run: |
+        tar -czf megaraid-tools-linux-x86_64.tar.gz mega_inquiry mega_format512 mega_modesel check_size README.md LICENSE
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: megaraid-tools-linux-x86_64
+        path: |
+          mega_inquiry
+          mega_format512
+          mega_modesel
+          check_size
+          megaraid-tools-linux-x86_64.tar.gz
+    
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: megaraid-tools-linux-x86_64
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          megaraid-tools-linux-x86_64.tar.gz
+          mega_inquiry
+          mega_format512
+          mega_modesel
+          check_size
+        body: |
+          ## MegaRAID Format Tools Release
+          
+          Pre-compiled binaries for Linux x86_64.
+          
+          ### Tools Included:
+          - `mega_inquiry` - Drive identification tool
+          - `mega_format512` - FORMAT UNIT tool
+          - `mega_modesel` - MODE SELECT + FORMAT tool
+          - `check_size` - Structure validation tool
+          
+          ### Usage:
+          Download the individual tools or the tar.gz archive containing all tools.
+          Make the tools executable: `chmod +x mega_inquiry mega_format512 mega_modesel check_size`
+          
+          See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md) for detailed usage instructions.
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
