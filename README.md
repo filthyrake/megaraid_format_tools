@@ -70,6 +70,56 @@ gcc -o mega_modesel mega_modesel.c
 ### 4. `check_size.c` - Structure Validation Tool
 Validates that the MegaRAID IOCTL structures match the expected sizes (404 bytes for `megasas_iocpacket`).
 
+### 5. `mega_format_immed.c` - FORMAT UNIT with IMMED (background format)
+Same idea as `mega_modesel.c` (MODE SELECT to 512, then FORMAT UNIT) but the
+FORMAT UNIT is sent with the **IMMED bit set** so it returns immediately and the
+drive formats in the background. This makes the reformat reliable on slow,
+multi-TB spinning drives, not just fast SSDs (see "The IMMED bit" below).
+
+**Usage:**
+```bash
+gcc -o mega_format_immed mega_format_immed.c
+./mega_format_immed /dev/sda <target_id>
+# then poll progress:
+./mega_progress /dev/sda <target_id>
+```
+
+### 6. `mega_progress.c` - FORMAT UNIT progress poller
+Sends REQUEST SENSE and reports background format progress. While a format runs
+the drive answers with sense key `0x2` / ASC `0x04` / ASCQ `0x04`
+("LOGICAL UNIT NOT READY, FORMAT IN PROGRESS") plus a 0-65536 progress value;
+when it's done the drive reports no error.
+
+**Usage:**
+```bash
+gcc -o mega_progress mega_progress.c
+./mega_progress /dev/sda <target_id>
+# FORMAT IN PROGRESS: 42.0% (27524/65536)
+```
+
+## The IMMED bit: why a format can "fail", hang, or half-complete
+
+By default `FORMAT UNIT` does **not** return until the entire format finishes.
+Sent through the MegaRAID passthrough that causes a subtle, drive-dependent bug:
+
+- On a **fast SSD**, the format finishes in seconds/minutes - sometimes before the
+  RAID controller's command timeout - so the tool appears to work (this is the
+  origin of the *"status 45 failure but it actually worked"* note above; status
+  45 = `MFI_STAT_SCSI_IO_FAILED`).
+- On a **slow multi-TB 7200rpm HDD**, the format takes **hours**. The controller's
+  command timeout fires long before completion and aborts the command with
+  `SCSI_IO_FAILED`. The drive is left **half-formatted and invalid**: a SMART
+  self-test returns "Input/output error", and the controller reports `0 KB` /
+  `UBad`. (Note: `smartctl` may still print `512 bytes / <full capacity>` - that
+  is the *intended* geometry from the mode page, not proof the medium is good.)
+
+Setting the **IMMED bit** in the FORMAT UNIT parameter-list header fixes this: the
+drive validates the request, returns immediately, and formats in the background.
+You then poll with `mega_progress`. `mega_format_immed.c` sets IMMED; the other
+formatters do not. If a no-IMMED attempt left a drive half-formatted, just run
+`mega_format_immed` and let it complete - the medium recovers once a format
+finishes.
+
 ## Step-by-Step Process
 
 ### Step 1: Identify the Problem Drive
@@ -110,6 +160,14 @@ The PERC controller caches the "unsupported" state. Even after successful format
 
 **Option B: Reboot the server**
 - Only if hot-swap isn't possible
+
+**Option C: Full COLD power cycle (chassis with no hot-swap backplane)**
+- On some servers the drives are cabled directly (no backplane / SES), so you
+  can't hot-reseat, and a *warm* reboot is not enough: after the format the drive
+  drops into a low-power state and a warm reboot leaves it powered, so the
+  controller just re-reads its stale `UGUnsp` / `0 KB` identity. Power the machine
+  fully **off**, wait ~30s so the drive spins down and loses power, then power on.
+  The controller then discovers it cleanly as a 512-byte JBOD.
 
 ### Step 5: Verify Success
 ```bash
@@ -206,6 +264,8 @@ apt-get install build-essential smartmontools sg3-utils lsscsi
 |------|-------------|
 | `mega_format512.c` | FORMAT UNIT tool - try this first |
 | `mega_modesel.c` | MODE SELECT + FORMAT tool - use if format512 fails |
+| `mega_format_immed.c` | MODE SELECT + FORMAT UNIT with IMMED (background format; reliable on slow HDDs) |
+| `mega_progress.c` | Poll background FORMAT UNIT progress via REQUEST SENSE |
 | `mega_inquiry.c` | INQUIRY test tool to verify passthrough works |
 | `check_size.c` | Structure size validation tool |
 | `README.md` | This documentation |
@@ -242,3 +302,9 @@ apt-get install build-essential smartmontools sg3-utils lsscsi
 *Created: January 2026*
 *Successfully used on Samsung PM1643a (OEM: SLM5B-M3R8SS) on Dell R740 with PERC H330*
 *Two drives reformatted from 520-byte to 512-byte sectors via MegaRAID passthrough IOCTL*
+
+*Also validated on **Dell PowerEdge T130 with PERC H730** (HBA-mode) reformatting*
+*2 TB HGST HMRP2000 7200rpm SAS HDDs. On these slow HDDs the non-IMMED FORMAT UNIT*
+*timed out and left the medium half-formatted; `mega_format_immed` + `mega_progress`*
+*(this PR) made it reliable, and a full cold power cycle was required to clear the*
+*controller's stale cache (contributed by @mwventures).*
