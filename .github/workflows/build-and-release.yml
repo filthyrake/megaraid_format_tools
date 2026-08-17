@@ -55,6 +55,11 @@ jobs:
         # mismatch already fails the build; run it so the numbers are in the log.
         ./check_size
 
+    - name: Sense parser tests
+      run: |
+        chmod +x run_tests.sh
+        ./run_tests.sh
+
     - name: Check ioctl struct definitions have not diverged
       run: |
         # Each tool carries its own copy of the megasas structs by design. They

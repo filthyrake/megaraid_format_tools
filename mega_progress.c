@@ -10,9 +10,12 @@
  *   ("LOGICAL UNIT NOT READY, FORMAT IN PROGRESS")
  * plus a progress indication in the sense-key-specific field, scaled to 65536.
  *
- * Both fixed-format (response code 0x70/0x71) and descriptor-format
- * (0x72/0x73) sense data are decoded, and the progress bytes are only read
- * when the drive sets SKSV to say they are valid.
+ * We send REQUEST SENSE with DESC=0, so a conformant target must answer in
+ * fixed format (response code 0x70/0x71) - the descriptor-format (0x72/0x73)
+ * branch below is defensive hardening against a non-conformant drive, not a
+ * path that should ever execute here. The progress bytes are only read when
+ * the drive sets SKSV, and only for the sense keys where those bytes actually
+ * mean progress.
  *
  * Once no format is in progress the tool issues READ CAPACITY(10) and reports
  * the drive's actual block size, rather than inferring completion from a
@@ -112,6 +115,7 @@ int send_cmd(int fd, int bus, int target, u8 *cdb, int cdblen, void *data, int l
 static int parse_sense(const u8 *sense, size_t len,
                        u8 *sense_key, u8 *asc, u8 *ascq, int *progress) {
     u8 resp;
+    int prog = -1;
 
     *progress = -1;
 
@@ -133,31 +137,43 @@ static int parse_sense(const u8 *sense, size_t len,
         *asc  = (valid > 12) ? sense[12] : 0;
         *ascq = (valid > 13) ? sense[13] : 0;
         if (valid > 17 && (sense[15] & 0x80))       /* SKSV */
-            *progress = (sense[16] << 8) | sense[17];
-        return 0;
-    }
+            prog = (sense[16] << 8) | sense[17];
 
-    if (resp == 0x72 || resp == 0x73) {             /* descriptor format */
+    } else if (resp == 0x72 || resp == 0x73) {      /* descriptor format */
         *sense_key = sense[1] & 0x0F;
         *asc  = sense[2];
         *ascq = sense[3];
 
-        /* Walk the descriptor list for the sense-key-specific descriptor
-           (type 0x02). Its bytes 4-6 carry the same SKSV + progress field
-           that lives at bytes 15-17 in fixed format. */
+        /* Walk the descriptor list. Type 0x02 (sense-key specific) carries at
+           its bytes 4-6 the same SKSV + progress field that lives at bytes
+           15-17 in fixed format. Type 0x0A ("another progress indication")
+           carries a progress value at its bytes 6-7 with no SKSV bit, and is
+           the fallback sg_get_sense_progress_fld checks second. */
         size_t end = 8 + (size_t)sense[7];
         if (end > len) end = len;
         for (size_t i = 8; i + 1 < end; ) {
             size_t dlen = 2 + (size_t)sense[i + 1];
             if (i + dlen > end) break;
             if (sense[i] == 0x02 && dlen >= 7 && (sense[i + 4] & 0x80))
-                *progress = (sense[i + 5] << 8) | sense[i + 6];
+                prog = (sense[i + 5] << 8) | sense[i + 6];
+            else if (sense[i] == 0x0A && dlen >= 8 && prog < 0)
+                prog = (sense[i + 6] << 8) | sense[i + 7];
             i += dlen;
         }
-        return 0;
+
+    } else {
+        return -1;
     }
 
-    return -1;
+    /* The sense-key-specific bytes are only a PROGRESS INDICATION for NO SENSE
+       and NOT READY. Under ILLEGAL REQUEST the very same bytes are a field
+       pointer, and under MEDIUM/HARDWARE ERROR they are an actual retry count -
+       rendering either of those as "40% complete" would be worse than reporting
+       no progress at all. sg_get_sense_progress_fld applies the same gate. */
+    if (prog >= 0 && (*sense_key == 0x00 || *sense_key == 0x02))
+        *progress = prog;
+
+    return 0;
 }
 
 /*
@@ -293,6 +309,14 @@ int main(int argc, char *argv[]) {
                Not a completion signal either way. */
             not_done = 1;
             printf("Drive NOT READY (ASC=0x%02x ASCQ=0x%02x) - not finished\n", asc, ascq);
+        } else if (progress >= 0) {
+            /* A progress indication without the 04/04 pair. parse_sense only
+               surfaces progress for NO SENSE / NOT READY, so this is a drive
+               reporting a background operation while keeping the LU accessible
+               - still running, and emphatically not a finished format. */
+            not_done = 1;
+            printf("Background operation in progress: %.1f%% (%d/65536)\n",
+                   progress * 100.0 / 65536.0, progress);
         } else if (sense_key == 0x06) {
             /* UNIT ATTENTION (bus reset, mode parameters changed, ...) is a
                one-shot condition that clears once reported. It says nothing

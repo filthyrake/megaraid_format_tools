@@ -120,8 +120,14 @@ int main(int argc, char *argv[]) {
     u8 format_cdb[6] = {0x04, 0x10, 0, 0, 0, 0};
     
     if (argc < 3) {
-        printf("MegaRAID Drive Formatter (520->512 byte sectors)\n");
+        printf("MegaRAID FORMAT UNIT (uses the drive's CURRENT sector size)\n");
         printf("Usage: %s <block_device> <target_id>\n", argv[0]);
+        printf("\n");
+        printf("This sends FORMAT UNIT only. FORMAT UNIT has no block-size field,\n");
+        printf("so it reformats at whatever size the drive's mode page already\n");
+        printf("holds - on a 520-byte drive it destroys the data and leaves it at\n");
+        printf("520. To change the sector size use mega_modesel (SSD) or\n");
+        printf("mega_format_immed (HDD, and the only safe choice on slow drives).\n");
         return 1;
     }
     target = parse_target(argv[2]);
@@ -160,7 +166,10 @@ int main(int argc, char *argv[]) {
     print_ascii(inq_data + 16, 16);
     printf("\n\n");
     
-    printf("*** FORMATTING TO 512-BYTE SECTORS IN 5 SECONDS ***\n");
+    /* Deliberately does NOT claim "to 512-byte sectors": no MODE SELECT is sent,
+       so this reformats at whatever size the mode page already holds. */
+    printf("*** FORMAT UNIT AT THE DRIVE'S CURRENT SECTOR SIZE IN 5 SECONDS ***\n");
+    printf("*** This does NOT change 520 -> 512; use mega_format_immed for that ***\n");
     printf("*** ALL DATA WILL BE DESTROYED - Ctrl+C to abort ***\n\n");
     for (int i = 5; i > 0; i--) {
         printf("%d...\n", i);

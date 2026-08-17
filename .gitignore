@@ -22,3 +22,5 @@ mega_final
 # IDE
 .vscode/
 .idea/
+parse_sense.inc
+test_parse_sense

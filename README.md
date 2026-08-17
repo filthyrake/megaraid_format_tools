@@ -66,6 +66,34 @@ preceding `MODE SELECT`. This tool only sends `FORMAT UNIT`, so it relies on the
 drive's current mode page. If it leaves the drive at 520, use `mega_modesel` or
 `mega_format_immed`, which set the block size first.
 
+### Drives formatted by older builds may have bogus defect entries
+
+Until this was fixed, `mega_format512` sent a 12-byte MODE SELECT block
+descriptor as its FORMAT UNIT parameter list. The drive decoded bytes 2-3 as
+`DEFECT LIST LENGTH = 8` and the remaining eight bytes as two short-block defect
+descriptors, so **every run added LBA 0 and LBA 512 to the drive's grown defect
+list**. LBA 0 is the partition table.
+
+The current tools no longer add them - but they do not remove them either. All
+three formatters send `CMPLST=0`, which means an existing grown list is kept
+across a format, so the entries persist indefinitely. Affected drives still work
+(the LBAs are transparently redirected to spare sectors); this is a latent
+oddity worth clearing, not an outage.
+
+To check and remediate a drive formatted by an older build:
+
+```bash
+# List the grown defect list - look for LBA 0 and LBA 512
+sg_defects -G /dev/sda
+
+# Clear it during a format by declaring the supplied list complete (CMPLST=1).
+# Destroys all data, and takes hours on a multi-TB HDD.
+sg_format --format --cmplst=1 --size=512 /dev/sda
+```
+
+`sg_format` defaults to `--cmplst=1`; these tools deliberately do not, so that a
+routine reformat never discards genuine media defects the drive has recorded.
+
 ### 3. `mega_modesel.c` - MODE SELECT + FORMAT Tool
 Uses MODE SELECT to set block size to 512, then FORMAT UNIT to apply. This was needed for Drive 2 (slot 5) where the direct FORMAT UNIT approach didn't work.
 
@@ -97,9 +125,13 @@ Sends REQUEST SENSE and reports background format progress. While a format runs
 the drive answers with sense key `0x2` / ASC `0x04` / ASCQ `0x04`
 ("LOGICAL UNIT NOT READY, FORMAT IN PROGRESS") plus a 0-65535 progress value.
 
-Both fixed-format (`0x70`/`0x71`) and descriptor-format (`0x72`/`0x73`) sense
-data are decoded, and the progress bytes are only trusted when the drive sets
-`SKSV`. Once no format is in progress it issues `READ CAPACITY(10)` and reports
+REQUEST SENSE is sent with `DESC=0`, so a conformant drive answers in
+fixed format (`0x70`/`0x71`); the descriptor-format (`0x72`/`0x73`) decoder is
+defensive hardening rather than a path that normally runs. Progress bytes are
+trusted only when the drive sets `SKSV` **and** the sense key is one where those
+bytes mean progress - under `ILLEGAL REQUEST` the same field is a pointer to the
+offending CDB byte, and under `MEDIUM ERROR` it is a retry count.
+Once no format is in progress it issues `READ CAPACITY(10)` and reports
 the drive's **actual** block size - completion is not inferred from a sense key
 of `0x0`, which equally means "nothing has happened yet".
 
