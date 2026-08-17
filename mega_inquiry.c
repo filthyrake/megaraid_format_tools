@@ -43,6 +43,34 @@ struct megasas_iocpacket {
   struct iovec sgl[MAX_IOCTL_SGE];
 } __attribute__((packed));
 
+/* INQUIRY vendor/product are 24 bytes the drive chooses, printed to a root
+   operator's terminal. Escape sequences in there could scroll away or overwrite
+   a destructive warning, or forge another drive's identity, so emit printable
+   ASCII only. */
+static void print_ascii(const u8 *s, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        putchar((s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : '?');
+}
+
+/*
+ * Parse a MegaRAID target id.
+ *
+ * atoi() silently turns "4x", "abc" and "" into 0 and returns no error, and
+ * target_id is a u8 so 256 wraps to 0 too - either way a mistyped argument
+ * aims a command at target 0 instead of refusing. Returns -1 on anything that
+ * is not a clean 0-255.
+ */
+static int parse_target(const char *s) {
+    char *end;
+    long v;
+
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v < 0 || v > 255)
+        return -1;
+    return (int)v;
+}
+
 int main(int argc, char *argv[]) {
     struct megasas_iocpacket ioc;
     struct megasas_pthru_frame *pthru;
@@ -53,7 +81,11 @@ int main(int argc, char *argv[]) {
         printf("Usage: %s <block_device> <target_id>\n", argv[0]);
         return 1;
     }
-    target = atoi(argv[2]);
+    target = parse_target(argv[2]);
+    if (target < 0) {
+        fprintf(stderr, "Invalid target id '%s' - expected 0-255\n", argv[2]);
+        return 1;
+    }
     
     fd_dev = open(argv[1], O_RDWR | O_NONBLOCK);
     if (fd_dev < 0) { perror("open block device"); return 1; }
@@ -94,7 +126,11 @@ int main(int argc, char *argv[]) {
            rc, errno, pthru->cmd_status, pthru->scsi_status);
     
     if (rc == 0 && pthru->cmd_status == 0) {
-        printf("SUCCESS!\nVendor: %.8s\nProduct: %.16s\n", inq_data+8, inq_data+16);
+        printf("SUCCESS!\nVendor: ");
+        print_ascii(inq_data + 8, 8);
+        printf("\nProduct: ");
+        print_ascii(inq_data + 16, 16);
+        putchar('\n');
     }
     close(fd_mega);
     return 0;

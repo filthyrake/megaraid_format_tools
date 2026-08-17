@@ -2,6 +2,8 @@
 mega_format512
 mega_modesel
 mega_inquiry
+mega_format_immed
+mega_progress
 check_size
 mega_format_v2
 mega_format_debug

@@ -72,6 +72,34 @@ int send_cmd(int fd, int bus, int target, u8 *cdb, int cdblen, void *data, int l
            (pthru->cmd_status ? pthru->cmd_status : -1);
 }
 
+/* INQUIRY vendor/product are 24 bytes the drive chooses, printed to a root
+   operator's terminal. Escape sequences in there could scroll away or overwrite
+   a destructive warning, or forge another drive's identity, so emit printable
+   ASCII only. */
+static void print_ascii(const u8 *s, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        putchar((s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : '?');
+}
+
+/*
+ * Parse a MegaRAID target id.
+ *
+ * atoi() silently turns "4x", "abc" and "" into 0 and returns no error, and
+ * target_id is a u8 so 256 wraps to 0 too - either way a mistyped argument
+ * aims a command at target 0 instead of refusing. Returns -1 on anything that
+ * is not a clean 0-255.
+ */
+static int parse_target(const char *s) {
+    char *end;
+    long v;
+
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v < 0 || v > 255)
+        return -1;
+    return (int)v;
+}
+
 int main(int argc, char *argv[]) {
     int fd_dev, fd_mega, bus_no = 0, target;
     u8 inq_data[96];
@@ -96,8 +124,17 @@ int main(int argc, char *argv[]) {
         printf("Usage: %s <block_device> <target_id>\n", argv[0]);
         return 1;
     }
-    target = atoi(argv[2]);
-    
+    target = parse_target(argv[2]);
+    if (target < 0) {
+        fprintf(stderr, "Invalid target id '%s' - expected 0-255\n", argv[2]);
+        return 1;
+    }
+
+    /* Line-buffer stdout so the destructive warning and countdown below are
+       actually visible when stdout is a pipe (tee, script, ...) rather than
+       sitting in a block buffer until the process exits. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     fd_dev = open(argv[1], O_RDWR | O_NONBLOCK);
     if (fd_dev < 0) { perror("open"); return 1; }
     if (ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no) < 0) {
@@ -117,7 +154,11 @@ int main(int argc, char *argv[]) {
         close(fd_mega);
         return 1;
     }
-    printf("Found: %.8s %.16s\n\n", inq_data+8, inq_data+16);
+    printf("Found: ");
+    print_ascii(inq_data + 8, 8);
+    putchar(' ');
+    print_ascii(inq_data + 16, 16);
+    printf("\n\n");
     
     printf("*** FORMATTING TO 512-BYTE SECTORS IN 5 SECONDS ***\n");
     printf("*** ALL DATA WILL BE DESTROYED - Ctrl+C to abort ***\n\n");
@@ -133,6 +174,8 @@ int main(int argc, char *argv[]) {
         printf("\nFORMAT command accepted!\n");
         printf("Format in progress - this will take 30-60 minutes.\n");
         printf("Monitor with: smartctl -d megaraid,%d -a /dev/sda\n", target);
+    } else if (rc < 0) {
+        printf("\nFORMAT failed: the ioctl itself did not complete.\n");
     } else {
         printf("\nFORMAT failed with status: 0x%02x\n", rc);
         if (rc == 0x45)
@@ -140,7 +183,9 @@ int main(int argc, char *argv[]) {
                    " controller timed out a blocking FORMAT UNIT. Use mega_format_immed\n"
                    " instead, which sets the IMMED bit. See README.)\n");
     }
-    
+
     close(fd_mega);
-    return rc;
+    /* Exit status is the SCSI status, so it must survive truncation mod 256:
+       returning a raw -1 would surface as 255 and collide with a real status. */
+    return (rc == 0) ? 0 : 1;
 }

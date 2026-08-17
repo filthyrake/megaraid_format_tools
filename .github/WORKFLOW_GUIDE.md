@@ -16,6 +16,8 @@ The workflow compiles these tools:
 - `mega_inquiry` - Drive identification tool
 - `mega_format512` - FORMAT UNIT tool
 - `mega_modesel` - MODE SELECT + FORMAT tool
+- `mega_format_immed` - MODE SELECT + FORMAT UNIT with IMMED (background format)
+- `mega_progress` - Background FORMAT UNIT progress poller
 - `check_size` - Structure validation tool
 
 ## How to Create a Release
@@ -70,14 +72,16 @@ sudo apt-get install build-essential
 gcc -O2 -Wall -Wextra -o mega_inquiry mega_inquiry.c
 gcc -O2 -Wall -Wextra -o mega_format512 mega_format512.c
 gcc -O2 -Wall -Wextra -o mega_modesel mega_modesel.c
+gcc -O2 -Wall -Wextra -o mega_format_immed mega_format_immed.c
+gcc -O2 -Wall -Wextra -o mega_progress mega_progress.c
 gcc -O2 -Wall -Wextra -o check_size check_size.c
 
 # Verify binaries
-ls -lh mega_inquiry mega_format512 mega_modesel check_size
+ls -lh mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size
 
 # Create tarball
 tar -czf megaraid-tools-linux-x86_64.tar.gz \
-    mega_inquiry mega_format512 mega_modesel check_size \
+    mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size \
     README.md LICENSE
 ```
 

@@ -40,6 +40,35 @@ jobs:
     - name: Test binaries exist
       run: |
         ls -lh mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size
+
+    - name: Smoke test
+      run: |
+        # Every tool prints usage and exits 1 with no args, before opening any
+        # device, so this is safe on a runner with no MegaRAID controller. It
+        # catches link failures and startup crashes that `ls` cannot.
+        for t in mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress; do
+          if ./"$t" > /dev/null 2>&1; then
+            echo "FAIL: $t exited 0 with no arguments"; exit 1
+          fi
+        done
+        # check_size carries _Static_assert on the ioctl struct layout, so a
+        # mismatch already fails the build; run it so the numbers are in the log.
+        ./check_size
+
+    - name: Check ioctl struct definitions have not diverged
+      run: |
+        # Each tool carries its own copy of the megasas structs by design. They
+        # must stay byte-identical: editing one copy alone would let check_size
+        # keep reporting 404 while another tool sends a malformed ioctl.
+        for f in mega_inquiry.c mega_format512.c mega_modesel.c \
+                 mega_format_immed.c mega_progress.c check_size.c; do
+          sed -n '/^struct megasas_sge32/,/^} __attribute__((packed));$/p' "$f" \
+            | sha256sum | cut -d' ' -f1
+        done | sort -u > /tmp/struct-hashes
+        if [ "$(wc -l < /tmp/struct-hashes)" -ne 1 ]; then
+          echo "FAIL: struct definitions differ across tools"; exit 1
+        fi
+        echo "All 6 copies identical: $(cat /tmp/struct-hashes)"
     
     - name: Create build artifacts archive
       run: |

@@ -28,7 +28,18 @@ struct megasas_iocpacket {
   struct iovec sgl[MAX_IOCTL_SGE];
 } __attribute__((packed));
 
-int main() {
+/* The whole point of this tool is that the layout matches what the megaraid_sas
+   driver expects. Asserting at compile time makes a mismatch a build failure
+   rather than a line of output nobody reads - main() used to return 0
+   unconditionally, so running it in CI proved nothing. */
+_Static_assert(sizeof(struct megasas_iocpacket) == 404,
+               "megasas_iocpacket must be 404 bytes (0x194)");
+_Static_assert(offsetof(struct megasas_iocpacket, frame) == 20,
+               "megasas_iocpacket.frame must be at offset 20");
+_Static_assert(offsetof(struct megasas_iocpacket, sgl) == 148,
+               "megasas_iocpacket.sgl must be at offset 148");
+
+int main(void) {
     printf("sizeof(megasas_iocpacket) = %zu (expected 0x194 = 404)\n", sizeof(struct megasas_iocpacket));
     printf("sizeof(megasas_pthru_frame) = %zu\n", sizeof(struct megasas_pthru_frame));
     printf("sizeof(iovec) = %zu\n", sizeof(struct iovec));
