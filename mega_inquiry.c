@@ -75,7 +75,7 @@ int main(int argc, char *argv[]) {
     struct megasas_iocpacket ioc;
     struct megasas_pthru_frame *pthru;
     u8 inq_data[96];
-    int fd_dev, fd_mega, bus_no, target;
+    int fd_dev, fd_mega, bus_no = 0, target;
     
     if (argc < 3) {
         printf("Usage: %s <block_device> <target_id>\n", argv[0]);
@@ -122,16 +122,30 @@ int main(int argc, char *argv[]) {
     pthru->cdb[4] = 96;
     
     int rc = ioctl(fd_mega, MEGASAS_IOC_FIRMWARE, &ioc);
-    printf("ioctl=%d errno=%d cmd=0x%02x scsi=0x%02x\n",
-           rc, errno, pthru->cmd_status, pthru->scsi_status);
-    
+    /* scsi_status is deliberately not printed: the driver copies back only
+       cmd_status (a single-byte copy_to_user of frame.hdr.cmd_status), so
+       scsi_status still holds whatever our own memset left. On the tool people
+       reach for when debugging, a fabricated 0x00 does the most damage.
+       errno is only meaningful when the ioctl actually failed. */
+    if (rc < 0)
+        printf("ioctl=%d errno=%d (%s) cmd_status=0x%02x\n",
+               rc, errno, strerror(errno), pthru->cmd_status);
+    else
+        printf("ioctl=%d cmd_status=0x%02x\n", rc, pthru->cmd_status);
+
     if (rc == 0 && pthru->cmd_status == 0) {
         printf("SUCCESS!\nVendor: ");
         print_ascii(inq_data + 8, 8);
         printf("\nProduct: ");
         print_ascii(inq_data + 16, 16);
         putchar('\n');
+        close(fd_mega);
+        return 0;
     }
+
+    /* Used to return 0 unconditionally, so a failed INQUIRY against a bad
+       target still looked like success to any script calling it. */
+    printf("INQUIRY failed - wrong target, or passthrough not working.\n");
     close(fd_mega);
-    return 0;
+    return 1;
 }

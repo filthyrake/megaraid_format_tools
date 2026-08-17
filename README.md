@@ -82,17 +82,37 @@ oddity worth clearing, not an outage.
 
 To check and remediate a drive formatted by an older build:
 
+> ⚠️ **The device argument below is NOT the one the `mega_*` tools take.**
+> Everywhere else in this README, `/dev/sda` is a *passthrough handle* - any
+> healthy drive on the same controller, used only to look up the host number,
+> never written to. The `sg_*` commands here address the target drive
+> **directly**, so passing `/dev/sda` out of habit points a destructive root
+> command at whatever `sda` happens to be, quite possibly your boot disk.
+> Confirm the node with `lsscsi` first and pass that.
+>
+> These commands also need the drive visible to Linux as an ordinary SCSI
+> device. `sg3-utils` has no MegaRAID passthrough, so they cannot reach a drive
+> the controller is still hiding - that is the whole reason the tools in this
+> repo exist. Use them only after the reformat has succeeded and the drive shows
+> up as JBOD.
+
 ```bash
+# Identify the real device node for the drive - do NOT guess
+lsscsi
+
 # List the grown defect list - look for LBA 0 and LBA 512
-sg_defects -G /dev/sda
+sg_defects -G /dev/sdX
 
 # Clear it during a format by declaring the supplied list complete (CMPLST=1).
-# Destroys all data, and takes hours on a multi-TB HDD.
-sg_format --format --cmplst=1 --size=512 /dev/sda
+# DESTROYS ALL DATA on /dev/sdX, and takes hours on a multi-TB HDD.
+sg_format --format --cmplst=1 --size=512 /dev/sdX
 ```
 
 `sg_format` defaults to `--cmplst=1`; these tools deliberately do not, so that a
 routine reformat never discards genuine media defects the drive has recorded.
+Because these tools also format with `DCRT=0`, the drive re-certifies the medium
+as it goes, so hard defects are re-discovered and re-added - clearing the grown
+list is less lossy than it sounds, but it is still not the default here.
 
 ### 3. `mega_modesel.c` - MODE SELECT + FORMAT Tool
 Uses MODE SELECT to set block size to 512, then FORMAT UNIT to apply. This was needed for Drive 2 (slot 5) where the direct FORMAT UNIT approach didn't work.
@@ -128,7 +148,9 @@ the drive answers with sense key `0x2` / ASC `0x04` / ASCQ `0x04`
 REQUEST SENSE is sent with `DESC=0`, so a conformant drive answers in
 fixed format (`0x70`/`0x71`); the descriptor-format (`0x72`/`0x73`) decoder is
 defensive hardening rather than a path that normally runs. Progress bytes are
-trusted only when the drive sets `SKSV` **and** the sense key is one where those
+trusted only when the drive supplies one - `SKSV` for the fixed layout and for
+descriptor type `0x02`, or the presence of descriptor type `0x0A`, which carries
+progress with no `SKSV` bit - **and** only when the sense key is one where those
 bytes mean progress - under `ILLEGAL REQUEST` the same field is a pointer to the
 offending CDB byte, and under `MEDIUM ERROR` it is a retry count.
 Once no format is in progress it issues `READ CAPACITY(10)` and reports
@@ -154,9 +176,17 @@ Exit status: `0` = ready at 512 bytes, `2` = ready but not at 512 bytes,
 got in the way), `1` = error.
 
 `3` is deliberately **not** success: the decision it gates is whether to power
-cycle the drive, and a drive must not lose power mid-format. Script it as
-`./mega_progress /dev/sda 3 60 && power_cycle` only if you are happy for `2`
-and `3` to both block the power cycle - which is the safe direction.
+cycle the drive, and a drive must not lose power mid-format. Note that `3` is
+only ever returned by the **one-shot** form - in polling mode the tool keeps
+polling instead of returning "still busy". So the gate is:
+
+```bash
+# one-shot: 0 only if the drive is ready AND at 512 bytes
+./mega_progress /dev/sda 4 && power_cycle
+```
+
+Both `2` (wrong block size) and `3` (not confirmed complete) block the power
+cycle, which is the safe direction to be wrong in.
 
 ## The IMMED bit: why a format can "fail", hang, or half-complete
 
@@ -224,7 +254,13 @@ gcc -o mega_format512 mega_format512.c
 smartctl -d megaraid,<target_id> -i /dev/sda | grep "block size"
 ```
 
-### Step 3: If FORMAT UNIT Fails, Use MODE SELECT
+### Step 3 (SSD path only): If FORMAT UNIT Fails, Use MODE SELECT
+
+This continues the SSD path from Step 2. **Do not run it on a slow or multi-TB
+HDD** - `mega_modesel` sends a blocking FORMAT UNIT and has the same
+half-formatting failure mode as `mega_format512`. On the HDD path,
+`mega_format_immed` already did the MODE SELECT.
+
 ```bash
 # Compile and run
 gcc -o mega_modesel mega_modesel.c
@@ -369,7 +405,10 @@ apt-get install build-essential smartmontools sg3-utils lsscsi
 - Or reboot the server
 
 ### Neither FORMAT method works
-- Try running FORMAT multiple times
+- Try again with `mega_format_immed`, which is the reliable path. Do **not**
+  repeatedly re-run the blocking formatters: on a slow HDD each attempt times
+  out and re-damages the medium, and older builds also added a defect-list
+  entry every run (see above)
 - Some drives may need specific firmware
 - May need to try in a different system with direct HBA access (LSI 9211-8i in IT mode)
 

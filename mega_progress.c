@@ -104,13 +104,20 @@ int send_cmd(int fd, int bus, int target, u8 *cdb, int cdblen, void *data, int l
 }
 
 /*
- * Decode REQUEST SENSE data in either fixed (response code 0x70/0x71) or
- * descriptor (0x72/0x73) format. Modern SAS drives may return either, and
- * the two put the sense key, ASC and ASCQ at different offsets.
+ * Decode REQUEST SENSE data. Fixed format (response code 0x70/0x71) is what
+ * this tool actually receives, because we send DESC=0; the descriptor format
+ * (0x72/0x73) path is defensive hardening for a non-conformant drive. The two
+ * layouts put the sense key, ASC and ASCQ at different offsets.
  *
- * Returns 0 on success, -1 if the response code is not recognized.
- * *progress is set to the 0-65535 progress indication if the drive supplied
- * one (SKSV=1), or left at -1 if it did not.
+ * Returns 0 on success, -1 if the buffer is too short to hold a sense header or
+ * the response code is not one of the four above.
+ *
+ * *progress receives a 0-65535 progress indication, or is left at -1. It is set
+ * only when the drive actually supplied one - SKSV=1 for the fixed layout and
+ * for descriptor type 0x02, or the presence of descriptor type 0x0A, which
+ * carries progress with no SKSV bit - AND only for sense keys NO SENSE and NOT
+ * READY, the two where those bytes mean progress at all. See the comment above
+ * the gate at the bottom of this function for why that matters.
  */
 static int parse_sense(const u8 *sense, size_t len,
                        u8 *sense_key, u8 *asc, u8 *ascq, int *progress) {
@@ -174,6 +181,51 @@ static int parse_sense(const u8 *sense, size_t len,
         *progress = prog;
 
     return 0;
+}
+
+enum drive_state {
+    STATE_FORMATTING,       /* 04/04 FORMAT IN PROGRESS */
+    STATE_NOT_READY,        /* NOT READY for some other reason */
+    STATE_BACKGROUND_OP,    /* progress reported without the 04/04 pair */
+    STATE_UNIT_ATTENTION,   /* says nothing about whether the format finished */
+    STATE_IDLE              /* nothing in progress - go ask READ CAPACITY */
+};
+
+/*
+ * Decide what the drive is doing. Everything except STATE_IDLE means "not
+ * confirmed complete", which is what stops the poller telling an operator it is
+ * safe to power cycle a drive that is still formatting.
+ *
+ * Split out from the poll loop so it can be tested without a controller - this
+ * is where the completion decision actually lives.
+ */
+static enum drive_state classify(u8 sense_key, u8 asc, u8 ascq, int progress) {
+    /* FORMAT IN PROGRESS is keyed off ASC/ASCQ rather than the sense key. Most
+       drives pair 04/04 with NOT READY (0x2), but some report a background
+       operation with NO SENSE (0x0) and a valid progress field; requiring the
+       key here would make those drives fall through and be reported as a
+       finished format. */
+    if (asc == 0x04 && ascq == 0x04)
+        return STATE_FORMATTING;
+
+    /* NOT READY for some other reason, e.g. 04/01 "becoming ready". */
+    if (sense_key == 0x02)
+        return STATE_NOT_READY;
+
+    /* A progress indication without the 04/04 pair. parse_sense only surfaces
+       progress for NO SENSE / NOT READY, so this is a drive running a
+       background operation while keeping the LU accessible - still running,
+       and emphatically not a finished format. */
+    if (progress >= 0)
+        return STATE_BACKGROUND_OP;
+
+    /* UNIT ATTENTION (bus reset, mode parameters changed, ...) is a one-shot
+       condition that clears once reported. It says nothing about whether the
+       format finished, so re-poll rather than declaring the drive done. */
+    if (sense_key == 0x06)
+        return STATE_UNIT_ATTENTION;
+
+    return STATE_IDLE;
 }
 
 /*
@@ -265,7 +317,8 @@ int main(int argc, char *argv[]) {
 
     for (;;) {
         u8 sense_key = 0, asc = 0, ascq = 0;
-        int progress = -1, not_done = 0;
+        int progress = -1;
+        enum drive_state state;
 
         memset(sense, 0, sizeof(sense));
         int rc = send_cmd(fd_mega, bus_no, target, req_sense_cdb, 6, sense, sizeof(sense), MFI_FRAME_DIR_READ);
@@ -291,42 +344,31 @@ int main(int argc, char *argv[]) {
         }
         soft_errors = 0;
 
-        if (asc == 0x04 && ascq == 0x04) {
-            /* FORMAT IN PROGRESS, keyed off ASC/ASCQ rather than the sense key.
-               Most drives pair 04/04 with NOT READY (0x2), but some report a
-               background operation with NO SENSE (0x0) and a valid SKSV
-               progress field - sg_requests keys off the progress indication
-               for the same reason. Requiring the key here would make those
-               drives fall through and get reported as a finished format. */
-            not_done = 1;
+        state = classify(sense_key, asc, ascq, progress);
+
+        switch (state) {
+        case STATE_FORMATTING:
             if (progress >= 0)
                 printf("FORMAT IN PROGRESS: %.1f%% (%d/65536)\n",
                        progress * 100.0 / 65536.0, progress);
             else
                 printf("FORMAT IN PROGRESS (drive supplied no progress indication)\n");
-        } else if (sense_key == 0x02) {
-            /* NOT READY for some other reason, e.g. 04/01 "becoming ready".
-               Not a completion signal either way. */
-            not_done = 1;
+            break;
+        case STATE_NOT_READY:
             printf("Drive NOT READY (ASC=0x%02x ASCQ=0x%02x) - not finished\n", asc, ascq);
-        } else if (progress >= 0) {
-            /* A progress indication without the 04/04 pair. parse_sense only
-               surfaces progress for NO SENSE / NOT READY, so this is a drive
-               reporting a background operation while keeping the LU accessible
-               - still running, and emphatically not a finished format. */
-            not_done = 1;
+            break;
+        case STATE_BACKGROUND_OP:
             printf("Background operation in progress: %.1f%% (%d/65536)\n",
                    progress * 100.0 / 65536.0, progress);
-        } else if (sense_key == 0x06) {
-            /* UNIT ATTENTION (bus reset, mode parameters changed, ...) is a
-               one-shot condition that clears once reported. It says nothing
-               about whether the format finished, so re-poll rather than
-               falling through and declaring the drive done. */
-            not_done = 1;
+            break;
+        case STATE_UNIT_ATTENTION:
             printf("UNIT ATTENTION (ASC=0x%02x ASCQ=0x%02x) - re-checking\n", asc, ascq);
+            break;
+        case STATE_IDLE:
+            break;
         }
 
-        if (not_done) {
+        if (state != STATE_IDLE) {
             if (interval <= 0) {
                 close(fd_mega);
                 return 3;       /* not confirmed complete - see exit status note */

@@ -94,9 +94,9 @@ static int parse_target(const char *s) {
 }
 
 /* INQUIRY vendor/product are 24 bytes the drive chooses, printed to a root
-   operator's terminal moments before a destructive countdown. Escape sequences
-   in there could scroll away or overwrite the warning, or forge another drive's
-   identity during the abort window, so emit printable ASCII only. */
+   operator's terminal. Escape sequences in there could scroll away or overwrite
+   a destructive warning, or forge another drive's identity, so emit printable
+   ASCII only. */
 static void print_ascii(const u8 *s, size_t n) {
     for (size_t i = 0; i < n; i++)
         putchar((s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : '?');
@@ -125,7 +125,17 @@ int main(int argc, char *argv[]) {
     /* FORMAT UNIT CDB - no data, use mode page settings */
     u8 format_cdb[6] = {0x04, 0x00, 0x00, 0x00, 0x00, 0x00};
     
-    if (argc < 3) { printf("Usage: %s <dev> <target>\n", argv[0]); return 1; }
+    if (argc < 3) {
+        printf("MegaRAID MODE SELECT + FORMAT UNIT (520->512 byte sectors)\n");
+        printf("Usage: %s <block_device> <target_id>\n", argv[0]);
+        printf("  <block_device> any drive on the same controller (e.g. /dev/sda);\n");
+        printf("                 used only to find the host number, never written to.\n");
+        printf("  <target_id>    MegaRAID target id of the drive to format.\n");
+        printf("\n");
+        printf("Sends a BLOCKING FORMAT UNIT. Safe on SSDs; on a slow or multi-TB\n");
+        printf("HDD use mega_format_immed instead - see README, \"The IMMED bit\".\n");
+        return 1;
+    }
     target = parse_target(argv[2]);
     if (target < 0) {
         fprintf(stderr, "Invalid target id '%s' - expected 0-255\n", argv[2]);
@@ -171,8 +181,8 @@ int main(int argc, char *argv[]) {
     if (rc != 0) {
         printf("\nMODE SELECT failed (status 0x%02x) - FORMAT UNIT not sent.\n", rc);
         close(fd_mega);
-        return rc;      /* used to return 0 here, reporting success for a drive
-                           that was never touched */
+        /* Used to return 0 here, reporting success for a drive never touched. */
+        return 1;
     }
 
     printf("\n*** FORMATTING TO 512-BYTE SECTORS IN 5 SECONDS ***\n");
@@ -182,6 +192,9 @@ int main(int argc, char *argv[]) {
     printf("\nStep 2: FORMAT UNIT - apply new settings\n");
     rc = send_cmd(fd_mega, bus_no, target, format_cdb, 6, NULL, 0, 0, "FORMAT UNIT");
 
+    /* Exit status must survive truncation mod 256: returning a raw -1 would
+       surface as 255, and a raw SCSI status could collide with mega_progress's
+       exit codes (2 = wrong block size). Report success or failure only. */
     close(fd_mega);
-    return rc;
+    return (rc == 0) ? 0 : 1;
 }

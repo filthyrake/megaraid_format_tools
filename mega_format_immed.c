@@ -205,7 +205,7 @@ int main(int argc, char *argv[]) {
     for (int i = countdown; i > 0; i--) { printf("%d...\n", i); sleep(1); }
 
     printf("\nStep 2: FORMAT UNIT with IMMED=1 (returns immediately)\n");
-    rc = send_cmd(fd_mega, bus_no, target, format_cdb, 6, format_param, 4, MFI_FRAME_DIR_WRITE, "FORMAT UNIT");
+    rc = send_cmd(fd_mega, bus_no, target, format_cdb, 6, format_param, sizeof(format_param), MFI_FRAME_DIR_WRITE, "FORMAT UNIT");
 
     if (rc == 0) {
         printf("\nAccepted. Drive is now formatting in the BACKGROUND (can take hours\n");
@@ -219,6 +219,9 @@ int main(int argc, char *argv[]) {
         printf("  ./mega_progress %s %d\n", argv[1], target);
     }
 
+    /* Exit status must survive truncation mod 256: returning a raw -1 would
+       surface as 255, and a raw SCSI status could collide with mega_progress's
+       exit codes (2 = wrong block size). Report success or failure only. */
     close(fd_mega);
-    return rc;
+    return (rc == 0) ? 0 : 1;
 }

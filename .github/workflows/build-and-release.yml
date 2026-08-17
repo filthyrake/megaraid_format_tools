@@ -97,6 +97,33 @@ jobs:
           exit 1
         fi
         echo "All 6 copies identical (incl. megasas_iocpacket): $(printf '%s' "$hashes" | sort -u | grep .)"
+
+    - name: Check duplicated helpers have not diverged
+      run: |
+        # parse_target and print_ascii are deliberately duplicated for the same
+        # reason the structs are - each tool must stay a single self-contained
+        # file. Duplication is fine; silent divergence is not, and both of these
+        # had already drifted in prose before this check existed.
+        check_helper() {
+          name=$1; shift
+          hashes=""
+          for f in "$@"; do
+            body=$(sed -n "/^static .* $name(/,/^}/p" "$f")
+            if [ "$(printf '%s\n' "$body" | grep -c .)" -lt 4 ]; then
+              echo "FAIL: could not extract $name() from $f"; exit 1
+            fi
+            hashes="$hashes$(printf '%s\n' "$body" | sha256sum | cut -d' ' -f1)
+        "
+          done
+          if [ "$(printf '%s' "$hashes" | sort -u | grep -c .)" -ne 1 ]; then
+            echo "FAIL: $name() differs across tools"; exit 1
+          fi
+          echo "$name() identical across $# files"
+        }
+        check_helper parse_target mega_inquiry.c mega_format512.c mega_modesel.c \
+                                 mega_format_immed.c mega_progress.c
+        check_helper print_ascii mega_inquiry.c mega_format512.c mega_modesel.c \
+                                 mega_format_immed.c
     
     - name: Create build artifacts archive
       run: |
