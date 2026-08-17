@@ -33,15 +33,101 @@ jobs:
         gcc -O2 -Wall -Wextra -o mega_inquiry mega_inquiry.c
         gcc -O2 -Wall -Wextra -o mega_format512 mega_format512.c
         gcc -O2 -Wall -Wextra -o mega_modesel mega_modesel.c
+        gcc -O2 -Wall -Wextra -o mega_format_immed mega_format_immed.c
+        gcc -O2 -Wall -Wextra -o mega_progress mega_progress.c
         gcc -O2 -Wall -Wextra -o check_size check_size.c
     
     - name: Test binaries exist
       run: |
-        ls -lh mega_inquiry mega_format512 mega_modesel check_size
+        ls -lh mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size
+
+    - name: Smoke test
+      run: |
+        # Every tool prints usage and exits 1 with no args, before opening any
+        # device, so this is safe on a runner with no MegaRAID controller. It
+        # catches link failures and startup crashes that `ls` cannot.
+        for t in mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress; do
+          # `&& rc=0 || rc=$?` captures the tool's own status without tripping
+          # `set -e`, which a bare failing assignment would.
+          out=$(./"$t" 2>&1) && rc=0 || rc=$?
+          # Require exactly 1, not merely non-zero: a startup segfault exits 139
+          # and would otherwise pass as if it were the usage path.
+          if [ "$rc" -ne 1 ]; then
+            echo "FAIL: $t exited $rc with no arguments, expected 1"; exit 1
+          fi
+          printf '%s\n' "$out" | grep -q 'Usage:' || {
+            echo "FAIL: $t printed no usage text"; exit 1
+          }
+        done
+        # check_size carries _Static_assert on the ioctl struct layout, so a
+        # mismatch already fails the build; run it so the numbers are in the log.
+        ./check_size
+
+    - name: Sense parser tests
+      run: sh run_tests.sh
+
+    - name: Check ioctl struct definitions have not diverged
+      run: |
+        # Each tool carries its own copy of the megasas structs by design. They
+        # must stay byte-identical: editing one copy alone would let check_size
+        # keep reporting 404 while another tool sends a malformed ioctl.
+        #
+        # The range must be per-block, not one span. A single sed range from
+        # megasas_sge32 to the first '} __attribute__((packed));' stops at the
+        # end of megasas_pthru_frame and never reaches megasas_iocpacket - the
+        # 404-byte outer struct this whole check exists to protect.
+        #
+        # Extraction matching nothing in every file would also make all six
+        # hashes identical (sha256 of empty), so assert a line floor first.
+        hashes=""
+        for f in mega_inquiry.c mega_format512.c mega_modesel.c \
+                 mega_format_immed.c mega_progress.c check_size.c; do
+          block=$(awk '/^(struct|union) megasas/,/__attribute__\(\(packed\)\);$/' "$f")
+          if [ "$(printf '%s\n' "$block" | grep -c 'megasas_iocpacket')" -lt 1 ] \
+             || [ "$(printf '%s\n' "$block" | wc -l)" -lt 17 ]; then
+            echo "FAIL: struct extraction from $f matched nothing or was truncated"
+            exit 1
+          fi
+          hashes="$hashes$(printf '%s\n' "$block" | sha256sum | cut -d' ' -f1)
+        "
+        done
+        count=$(printf '%s' "$hashes" | sort -u | grep -c .)
+        if [ "$count" -ne 1 ]; then
+          echo "FAIL: struct definitions differ across tools"
+          exit 1
+        fi
+        echo "All 6 copies identical (incl. megasas_iocpacket): $(printf '%s' "$hashes" | sort -u | grep .)"
+
+    - name: Check duplicated helpers have not diverged
+      run: |
+        # parse_target and print_ascii are deliberately duplicated for the same
+        # reason the structs are - each tool must stay a single self-contained
+        # file. Duplication is fine; silent divergence is not, and both of these
+        # had already drifted in prose before this check existed.
+        check_helper() {
+          name=$1; shift
+          hashes=""
+          for f in "$@"; do
+            body=$(sed -n "/^static .* $name(/,/^}/p" "$f")
+            if [ "$(printf '%s\n' "$body" | grep -c .)" -lt 4 ]; then
+              echo "FAIL: could not extract $name() from $f"; exit 1
+            fi
+            hashes="$hashes$(printf '%s\n' "$body" | sha256sum | cut -d' ' -f1)
+        "
+          done
+          if [ "$(printf '%s' "$hashes" | sort -u | grep -c .)" -ne 1 ]; then
+            echo "FAIL: $name() differs across tools"; exit 1
+          fi
+          echo "$name() identical across $# files"
+        }
+        check_helper parse_target mega_inquiry.c mega_format512.c mega_modesel.c \
+                                 mega_format_immed.c mega_progress.c
+        check_helper print_ascii mega_inquiry.c mega_format512.c mega_modesel.c \
+                                 mega_format_immed.c
     
     - name: Create build artifacts archive
       run: |
-        tar -czf megaraid-tools-linux-x86_64.tar.gz mega_inquiry mega_format512 mega_modesel check_size README.md LICENSE
+        tar -czf megaraid-tools-linux-x86_64.tar.gz mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size README.md LICENSE
     
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -51,6 +137,8 @@ jobs:
           mega_inquiry
           mega_format512
           mega_modesel
+          mega_format_immed
+          mega_progress
           check_size
           megaraid-tools-linux-x86_64.tar.gz
     
@@ -79,6 +167,8 @@ jobs:
           mega_inquiry
           mega_format512
           mega_modesel
+          mega_format_immed
+          mega_progress
           check_size
         body: |
           ## MegaRAID Format Tools Release
@@ -89,11 +179,13 @@ jobs:
           - `mega_inquiry` - Drive identification tool
           - `mega_format512` - FORMAT UNIT tool
           - `mega_modesel` - MODE SELECT + FORMAT tool
+          - `mega_format_immed` - MODE SELECT + FORMAT UNIT with IMMED (background format; reliable on slow HDDs)
+          - `mega_progress` - Poll background FORMAT UNIT progress
           - `check_size` - Structure validation tool
           
           ### Usage:
           Download the individual tools or the tar.gz archive containing all tools.
-          Make the tools executable: `chmod +x mega_inquiry mega_format512 mega_modesel check_size`
+          Make the tools executable: `chmod +x mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size`
           
           See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md) for detailed usage instructions.
         draft: false

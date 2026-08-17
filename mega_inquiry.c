@@ -43,17 +43,49 @@ struct megasas_iocpacket {
   struct iovec sgl[MAX_IOCTL_SGE];
 } __attribute__((packed));
 
+/* INQUIRY vendor/product are 24 bytes the drive chooses, printed to a root
+   operator's terminal. Escape sequences in there could scroll away or overwrite
+   a destructive warning, or forge another drive's identity, so emit printable
+   ASCII only. */
+static void print_ascii(const u8 *s, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        putchar((s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : '?');
+}
+
+/*
+ * Parse a MegaRAID target id.
+ *
+ * atoi() silently turns "4x", "abc" and "" into 0 and returns no error, and
+ * target_id is a u8 so 256 wraps to 0 too - either way a mistyped argument
+ * aims a command at target 0 instead of refusing. Returns -1 on anything that
+ * is not a clean 0-255.
+ */
+static int parse_target(const char *s) {
+    char *end;
+    long v;
+
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v < 0 || v > 255)
+        return -1;
+    return (int)v;
+}
+
 int main(int argc, char *argv[]) {
     struct megasas_iocpacket ioc;
     struct megasas_pthru_frame *pthru;
     u8 inq_data[96];
-    int fd_dev, fd_mega, bus_no, target;
+    int fd_dev, fd_mega, bus_no = 0, target;
     
     if (argc < 3) {
-        printf("Usage: %s <block_device> <target_id>\\n", argv[0]);
+        printf("Usage: %s <block_device> <target_id>\n", argv[0]);
         return 1;
     }
-    target = atoi(argv[2]);
+    target = parse_target(argv[2]);
+    if (target < 0) {
+        fprintf(stderr, "Invalid target id '%s' - expected 0-255\n", argv[2]);
+        return 1;
+    }
     
     fd_dev = open(argv[1], O_RDWR | O_NONBLOCK);
     if (fd_dev < 0) { perror("open block device"); return 1; }
@@ -61,7 +93,7 @@ int main(int argc, char *argv[]) {
     if (ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no) < 0) {
         perror("get bus number"); close(fd_dev); return 1;
     }
-    printf("Bus: %d, Target: %d\\n", bus_no, target);
+    printf("Bus: %d, Target: %d\n", bus_no, target);
     close(fd_dev);
     
     fd_mega = open("/dev/megaraid_sas_ioctl_node", O_RDWR);
@@ -90,12 +122,30 @@ int main(int argc, char *argv[]) {
     pthru->cdb[4] = 96;
     
     int rc = ioctl(fd_mega, MEGASAS_IOC_FIRMWARE, &ioc);
-    printf("ioctl=%d errno=%d cmd=0x%02x scsi=0x%02x\\n",
-           rc, errno, pthru->cmd_status, pthru->scsi_status);
-    
+    /* scsi_status is deliberately not printed: the driver copies back only
+       cmd_status (a single-byte copy_to_user of frame.hdr.cmd_status), so
+       scsi_status still holds whatever our own memset left. On the tool people
+       reach for when debugging, a fabricated 0x00 does the most damage.
+       errno is only meaningful when the ioctl actually failed. */
+    if (rc < 0)
+        printf("ioctl=%d errno=%d (%s) cmd_status=0x%02x\n",
+               rc, errno, strerror(errno), pthru->cmd_status);
+    else
+        printf("ioctl=%d cmd_status=0x%02x\n", rc, pthru->cmd_status);
+
     if (rc == 0 && pthru->cmd_status == 0) {
-        printf("SUCCESS!\\nVendor: %.8s\\nProduct: %.16s\\n", inq_data+8, inq_data+16);
+        printf("SUCCESS!\nVendor: ");
+        print_ascii(inq_data + 8, 8);
+        printf("\nProduct: ");
+        print_ascii(inq_data + 16, 16);
+        putchar('\n');
+        close(fd_mega);
+        return 0;
     }
+
+    /* Used to return 0 unconditionally, so a failed INQUIRY against a bad
+       target still looked like success to any script calling it. */
+    printf("INQUIRY failed - wrong target, or passthrough not working.\n");
     close(fd_mega);
-    return 0;
+    return 1;
 }

@@ -82,8 +82,39 @@ int send_cmd(int fd, int bus, int target, u8 *cdb, int cdblen, void *data, int l
     pthru->timeout = 0;
     memcpy(pthru->cdb, cdb, cdblen);
     int rc = ioctl(fd, MEGASAS_IOC_FIRMWARE, &ioc);
-    printf("%-12s cmd_status=0x%02x scsi_status=0x%02x\n", name, pthru->cmd_status, pthru->scsi_status);
+    /* Only cmd_status is copied back by the driver (a single-byte
+       copy_to_user of frame.hdr.cmd_status); scsi_status stays whatever our
+       own memset left, so printing it would show a fabricated 0x00. */
+    printf("%-12s cmd_status=0x%02x\n", name, pthru->cmd_status);
     return (rc == 0) ? pthru->cmd_status : -1;
+}
+
+/* INQUIRY vendor/product are 24 bytes the drive chooses, printed to a root
+   operator's terminal. Escape sequences in there could scroll away or overwrite
+   a destructive warning, or forge another drive's identity, so emit printable
+   ASCII only. */
+static void print_ascii(const u8 *s, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        putchar((s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : '?');
+}
+
+/*
+ * Parse a MegaRAID target id.
+ *
+ * atoi() silently turns "4x", "abc" and "" into 0 and returns no error, and
+ * target_id is a u8 so 256 wraps to 0 too - either way a mistyped argument
+ * aims a command at target 0 instead of refusing. Returns -1 on anything that
+ * is not a clean 0-255.
+ */
+static int parse_target(const char *s) {
+    char *end;
+    long v;
+
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v < 0 || v > 255)
+        return -1;
+    return (int)v;
 }
 
 int main(int argc, char *argv[]) {
@@ -113,11 +144,27 @@ int main(int argc, char *argv[]) {
         printf("  <target_id>    MegaRAID target id of the drive to format.\n");
         return 1;
     }
-    target = atoi(argv[2]);
+    target = parse_target(argv[2]);
+    if (target < 0) {
+        fprintf(stderr, "Invalid target id '%s' - expected 0-255\n", argv[2]);
+        return 1;
+    }
+
+    /* Line-buffer stdout: the destructive warning and the abort countdown below
+       are useless if they sit in a block buffer until exit, which is what
+       happens whenever stdout is a pipe (running under tee, script, etc). */
+    setvbuf(stdout, NULL, _IOLBF, 0);
 
     fd_dev = open(argv[1], O_RDWR | O_NONBLOCK);
     if (fd_dev < 0) { perror("open dev"); return 1; }
-    ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no);
+    /* Must be checked: bus_no defaults to 0, so a failure here would silently
+       send a destructive FORMAT to target <target_id> on host 0 - potentially a
+       different controller than the one the user named. */
+    if (ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no) < 0) {
+        perror("SCSI_IOCTL_GET_BUS_NUMBER");
+        close(fd_dev);
+        return 1;
+    }
     close(fd_dev);
 
     fd_mega = open("/dev/megaraid_sas_ioctl_node", O_RDWR);
@@ -130,25 +177,41 @@ int main(int argc, char *argv[]) {
         close(fd_mega);
         return 1;
     }
-    printf("Found: %.8s %.16s\n\n", inq_data + 8, inq_data + 16);
+    printf("Found: ");
+    print_ascii(inq_data + 8, 8);
+    putchar(' ');
+    print_ascii(inq_data + 16, 16);
+    printf("\n\n");
 
-    printf("*** FORMATTING TO 512-BYTE SECTORS IN 5 SECONDS ***\n");
-    printf("*** ALL DATA WILL BE DESTROYED - Ctrl+C to abort ***\n\n");
-    for (int i = 5; i > 0; i--) { printf("%d...\n", i); sleep(1); }
-
-    printf("\nStep 1: MODE SELECT - set block size to 512\n");
+    /* MODE SELECT first. It is not the destructive step - FORMAT UNIT is - so
+       run it before the abort countdown. That way the countdown is the LAST
+       thing before data loss and the user can still bail out having seen
+       whether the drive actually accepted 512-byte sectors. */
+    printf("Step 1: MODE SELECT - set block size to 512\n");
     int rc = send_cmd(fd_mega, bus_no, target, mode_sel_cdb, 6, mode_sel_data, 12, MFI_FRAME_DIR_WRITE, "MODE SELECT");
-    if (rc != 0)
-        printf("(MODE SELECT returned 0x%02x; continuing - some drives still format.)\n", rc);
+
+    int countdown = 5;
+    if (rc != 0) {
+        printf("\n*** MODE SELECT FAILED (status 0x%02x) ***\n", rc);
+        printf("The drive has NOT accepted 512-byte sectors. Formatting now will\n");
+        printf("destroy all data and may still leave the drive at 520 bytes.\n");
+        printf("Some drives do take the new size from FORMAT UNIT anyway, so this\n");
+        printf("is not always fatal - but continue only if that is what you want.\n");
+        countdown = 15;
+    }
+
+    printf("\n*** FORMATTING TO 512-BYTE SECTORS IN %d SECONDS ***\n", countdown);
+    printf("*** ALL DATA WILL BE DESTROYED - Ctrl+C to abort ***\n\n");
+    for (int i = countdown; i > 0; i--) { printf("%d...\n", i); sleep(1); }
 
     printf("\nStep 2: FORMAT UNIT with IMMED=1 (returns immediately)\n");
-    rc = send_cmd(fd_mega, bus_no, target, format_cdb, 6, format_param, 4, MFI_FRAME_DIR_WRITE, "FORMAT UNIT");
+    rc = send_cmd(fd_mega, bus_no, target, format_cdb, 6, format_param, sizeof(format_param), MFI_FRAME_DIR_WRITE, "FORMAT UNIT");
 
     if (rc == 0) {
         printf("\nAccepted. Drive is now formatting in the BACKGROUND (can take hours\n");
         printf("on a multi-TB HDD). Do NOT power off until it finishes.\n");
         printf("Monitor progress with:\n");
-        printf("  ./mega_progress %s %d\n", argv[1], target);
+        printf("  ./mega_progress %s %d 60\n", argv[1], target);
         printf("When done, clear the controller's stale cache (see README) and verify:\n");
         printf("  smartctl -d megaraid,%d -i /dev/sda | grep -i 'block size'\n", target);
     } else {
@@ -156,6 +219,9 @@ int main(int argc, char *argv[]) {
         printf("  ./mega_progress %s %d\n", argv[1], target);
     }
 
+    /* Exit status must survive truncation mod 256: returning a raw -1 would
+       surface as 255, and a raw SCSI status could collide with mega_progress's
+       exit codes (2 = wrong block size). Report success or failure only. */
     close(fd_mega);
-    return rc;
+    return (rc == 0) ? 0 : 1;
 }
