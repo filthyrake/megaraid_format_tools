@@ -8,8 +8,18 @@
  * While a format runs the drive answers REQUEST SENSE with:
  *   sense key 0x2 (NOT READY), ASC 0x04, ASCQ 0x04
  *   ("LOGICAL UNIT NOT READY, FORMAT IN PROGRESS")
- * and a progress indication in the sense-key-specific bytes (16-17), scaled
- * to 65536. When the format is done the drive reports no error (sense key 0x0).
+ * plus a progress indication in the sense-key-specific field, scaled to 65536.
+ *
+ * Both fixed-format (response code 0x70/0x71) and descriptor-format
+ * (0x72/0x73) sense data are decoded, and the progress bytes are only read
+ * when the drive sets SKSV to say they are valid.
+ *
+ * Once no format is in progress the tool issues READ CAPACITY(10) and reports
+ * the drive's actual block size, rather than inferring completion from a
+ * sense key of 0x0 (which equally means "nothing has happened yet").
+ *
+ * Exit status: 0 = ready at 512 bytes (or format still running),
+ *              2 = ready but not at 512 bytes, 1 = error.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,47 +89,157 @@ int send_cmd(int fd, int bus, int target, u8 *cdb, int cdblen, void *data, int l
     return (rc == 0) ? pthru->cmd_status : -1;
 }
 
+/*
+ * Decode REQUEST SENSE data in either fixed (response code 0x70/0x71) or
+ * descriptor (0x72/0x73) format. Modern SAS drives may return either, and
+ * the two put the sense key, ASC and ASCQ at different offsets.
+ *
+ * Returns 0 on success, -1 if the response code is not recognized.
+ * *progress is set to the 0-65535 progress indication if the drive supplied
+ * one (SKSV=1), or left at -1 if it did not.
+ */
+static int parse_sense(const u8 *sense, size_t len,
+                       u8 *sense_key, u8 *asc, u8 *ascq, int *progress) {
+    u8 resp = sense[0] & 0x7F;
+
+    *progress = -1;
+
+    if (resp == 0x70 || resp == 0x71) {             /* fixed format */
+        if (len < 18) return -1;
+        *sense_key = sense[2] & 0x0F;
+        *asc  = sense[12];
+        *ascq = sense[13];
+        if (sense[15] & 0x80)                       /* SKSV */
+            *progress = (sense[16] << 8) | sense[17];
+        return 0;
+    }
+
+    if (resp == 0x72 || resp == 0x73) {             /* descriptor format */
+        if (len < 8) return -1;
+        *sense_key = sense[1] & 0x0F;
+        *asc  = sense[2];
+        *ascq = sense[3];
+
+        /* Walk the descriptor list for the sense-key-specific descriptor
+           (type 0x02). Its bytes 4-6 carry the same SKSV + progress field
+           that lives at bytes 15-17 in fixed format. */
+        size_t end = 8 + (size_t)sense[7];
+        if (end > len) end = len;
+        for (size_t i = 8; i + 1 < end; ) {
+            size_t dlen = 2 + (size_t)sense[i + 1];
+            if (i + dlen > end) break;
+            if (sense[i] == 0x02 && dlen >= 7 && (sense[i + 4] & 0x80))
+                *progress = (sense[i + 5] << 8) | sense[i + 6];
+            i += dlen;
+        }
+        return 0;
+    }
+
+    return -1;
+}
+
+/* READ CAPACITY(10). Returns the block length in bytes, or -1 on failure. */
+static int read_block_size(int fd, int bus, int target, u32 *last_lba) {
+    u8 cdb[10] = {0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    u8 cap[8];
+
+    memset(cap, 0, sizeof(cap));
+    if (send_cmd(fd, bus, target, cdb, 10, cap, sizeof(cap), MFI_FRAME_DIR_READ) != 0)
+        return -1;
+
+    *last_lba = ((u32)cap[0] << 24) | ((u32)cap[1] << 16) | ((u32)cap[2] << 8) | cap[3];
+    return ((int)cap[4] << 24) | ((int)cap[5] << 16) | ((int)cap[6] << 8) | cap[7];
+}
+
 int main(int argc, char *argv[]) {
-    int fd_dev, fd_mega, bus_no = 0, target;
+    int fd_dev, fd_mega, bus_no = 0, target, interval = 0;
     u8 sense[96];
     u8 req_sense_cdb[6] = {0x03, 0x00, 0x00, 0x00, sizeof(sense), 0x00};
 
     if (argc < 3) {
         printf("MegaRAID FORMAT UNIT progress poller\n");
-        printf("Usage: %s <block_device> <target_id>\n", argv[0]);
+        printf("Usage: %s <block_device> <target_id> [interval_seconds]\n", argv[0]);
+        printf("  With no interval, reports once and exits.\n");
+        printf("  With an interval, polls until the format completes.\n");
         return 1;
     }
     target = atoi(argv[2]);
+    if (argc > 3) interval = atoi(argv[3]);
 
     fd_dev = open(argv[1], O_RDWR | O_NONBLOCK);
     if (fd_dev < 0) { perror("open dev"); return 1; }
-    ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no);
+    if (ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no) < 0) {
+        perror("SCSI_IOCTL_GET_BUS_NUMBER");
+        close(fd_dev);
+        return 1;
+    }
     close(fd_dev);
 
     fd_mega = open("/dev/megaraid_sas_ioctl_node", O_RDWR);
     if (fd_mega < 0) { perror("open megaraid"); return 1; }
 
-    memset(sense, 0, sizeof(sense));
-    int rc = send_cmd(fd_mega, bus_no, target, req_sense_cdb, 6, sense, sizeof(sense), MFI_FRAME_DIR_READ);
-    if (rc != 0) {
-        printf("REQUEST SENSE failed (status 0x%02x) - wrong target?\n", rc);
+    for (;;) {
+        u8 sense_key = 0, asc = 0, ascq = 0;
+        int progress = -1;
+
+        memset(sense, 0, sizeof(sense));
+        int rc = send_cmd(fd_mega, bus_no, target, req_sense_cdb, 6, sense, sizeof(sense), MFI_FRAME_DIR_READ);
+        if (rc != 0) {
+            printf("REQUEST SENSE failed (status 0x%02x) - wrong target?\n", rc);
+            close(fd_mega);
+            return 1;
+        }
+
+        if (parse_sense(sense, sizeof(sense), &sense_key, &asc, &ascq, &progress) < 0) {
+            printf("Unrecognized sense response code 0x%02x - cannot decode.\n", sense[0] & 0x7F);
+            close(fd_mega);
+            return 1;
+        }
+
+        if (sense_key == 0x02 && asc == 0x04 && ascq == 0x04) {
+            if (progress >= 0)
+                printf("FORMAT IN PROGRESS: %.1f%% (%d/65536)\n",
+                       progress * 100.0 / 65536.0, progress);
+            else
+                printf("FORMAT IN PROGRESS (drive supplied no progress indication)\n");
+
+            if (interval <= 0)
+                break;
+            sleep(interval);
+            continue;
+        }
+
+        /* Not formatting. Do NOT infer "complete" from sense key 0x0 - NO SENSE
+           equally means "nothing has happened yet", so a poll issued before the
+           format starts would report success. Ask the drive what its block size
+           actually is instead; that is the thing we care about anyway. */
+        if (sense_key != 0x00)
+            printf("sense key=0x%x ASC=0x%02x ASCQ=0x%02x (no format in progress)\n",
+                   sense_key, asc, ascq);
+
+        u32 last_lba = 0;
+        int bs = read_block_size(fd_mega, bus_no, target, &last_lba);
+        if (bs < 0) {
+            printf("No format in progress, but READ CAPACITY failed - drive not ready.\n");
+            close(fd_mega);
+            return 1;
+        }
+
+        printf("Drive ready: block size %d bytes", bs);
+        if (last_lba == 0xFFFFFFFFu)
+            printf(", capacity exceeds READ CAPACITY(10) range\n");
+        else
+            printf(", %u blocks (%.2f TB)\n", last_lba + 1,
+                   (last_lba + 1.0) * bs / 1e12);
+
+        if (bs != 512) {
+            printf("NOTE: block size is %d, not 512 - the reformat has not taken effect.\n", bs);
+            close(fd_mega);
+            return 2;
+        }
+
         close(fd_mega);
-        return 1;
-    }
-
-    u8 sense_key = sense[2] & 0x0F;
-    u8 asc = sense[12];
-    u8 ascq = sense[13];
-
-    if (sense_key == 0x02 && asc == 0x04 && ascq == 0x04) {
-        int prog = (sense[16] << 8) | sense[17];   /* scaled to 65536 */
-        printf("FORMAT IN PROGRESS: %.1f%% (%d/65536)\n", prog * 100.0 / 65536.0, prog);
-    } else if (sense_key == 0x00) {
-        printf("Drive reports NO error -> format complete / ready.\n");
-        printf("Verify: smartctl -d megaraid,%d -i /dev/sda | grep -i 'block size'\n", target);
-    } else {
-        printf("sense key=0x%x ASC=0x%02x ASCQ=0x%02x (not a format-in-progress state)\n",
-               sense_key, asc, ascq);
+        return 0;
     }
 
     close(fd_mega);

@@ -63,13 +63,16 @@ int send_cmd(int fd, int bus, int target, u8 *cdb, int cdblen, void *data, int l
     pthru->flags = dir;
     pthru->timeout = 0;
     memcpy(pthru->cdb, cdb, cdblen);
-    int rc = ioctl(fd, MEGASAS_IOC_FIRMWARE, &ioc);
-    printf("%s: cmd_status=0x%02x scsi_status=0x%02x\\n", name, pthru->cmd_status, pthru->scsi_status);
+    if (ioctl(fd, MEGASAS_IOC_FIRMWARE, &ioc) < 0) {
+        printf("%s: ioctl failed: %s\n", name, strerror(errno));
+        return -1;
+    }
+    printf("%s: cmd_status=0x%02x scsi_status=0x%02x\n", name, pthru->cmd_status, pthru->scsi_status);
     return pthru->cmd_status;
 }
 
 int main(int argc, char *argv[]) {
-    int fd_dev, fd_mega, bus_no, target;
+    int fd_dev, fd_mega, bus_no = 0, target;
     
     /* MODE SELECT(6) parameter: header(4) + block descriptor(8) = 12 bytes
        Setting block size to 512 (0x000200) */
@@ -89,23 +92,28 @@ int main(int argc, char *argv[]) {
     /* FORMAT UNIT CDB - no data, use mode page settings */
     u8 format_cdb[6] = {0x04, 0x00, 0x00, 0x00, 0x00, 0x00};
     
-    if (argc < 3) { printf("Usage: %s <dev> <target>\\n", argv[0]); return 1; }
+    if (argc < 3) { printf("Usage: %s <dev> <target>\n", argv[0]); return 1; }
     target = atoi(argv[2]);
     
     fd_dev = open(argv[1], O_RDWR | O_NONBLOCK);
-    ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no);
+    if (fd_dev < 0) { perror("open dev"); return 1; }
+    if (ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no) < 0) {
+        perror("SCSI_IOCTL_GET_BUS_NUMBER");
+        close(fd_dev);
+        return 1;
+    }
     close(fd_dev);
     
     fd_mega = open("/dev/megaraid_sas_ioctl_node", O_RDWR);
     if (fd_mega < 0) { perror("open"); return 1; }
     
-    printf("Target %d bus %d\\n\\n", target, bus_no);
+    printf("Target %d bus %d\n\n", target, bus_no);
     
-    printf("Step 1: MODE SELECT - set block size to 512\\n");
+    printf("Step 1: MODE SELECT - set block size to 512\n");
     int rc = send_cmd(fd_mega, bus_no, target, mode_sel_cdb, 6, mode_sel_data, 12, MFI_FRAME_DIR_WRITE, "MODE SELECT");
     
     if (rc == 0) {
-        printf("\\nStep 2: FORMAT UNIT - apply new settings\\n");
+        printf("\nStep 2: FORMAT UNIT - apply new settings\n");
         send_cmd(fd_mega, bus_no, target, format_cdb, 6, NULL, 0, 0, "FORMAT UNIT");
     }
     

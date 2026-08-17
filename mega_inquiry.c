@@ -50,7 +50,7 @@ int main(int argc, char *argv[]) {
     int fd_dev, fd_mega, bus_no, target;
     
     if (argc < 3) {
-        printf("Usage: %s <block_device> <target_id>\\n", argv[0]);
+        printf("Usage: %s <block_device> <target_id>\n", argv[0]);
         return 1;
     }
     target = atoi(argv[2]);
@@ -61,7 +61,7 @@ int main(int argc, char *argv[]) {
     if (ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no) < 0) {
         perror("get bus number"); close(fd_dev); return 1;
     }
-    printf("Bus: %d, Target: %d\\n", bus_no, target);
+    printf("Bus: %d, Target: %d\n", bus_no, target);
     close(fd_dev);
     
     fd_mega = open("/dev/megaraid_sas_ioctl_node", O_RDWR);
@@ -90,11 +90,11 @@ int main(int argc, char *argv[]) {
     pthru->cdb[4] = 96;
     
     int rc = ioctl(fd_mega, MEGASAS_IOC_FIRMWARE, &ioc);
-    printf("ioctl=%d errno=%d cmd=0x%02x scsi=0x%02x\\n",
+    printf("ioctl=%d errno=%d cmd=0x%02x scsi=0x%02x\n",
            rc, errno, pthru->cmd_status, pthru->scsi_status);
     
     if (rc == 0 && pthru->cmd_status == 0) {
-        printf("SUCCESS!\\nVendor: %.8s\\nProduct: %.16s\\n", inq_data+8, inq_data+16);
+        printf("SUCCESS!\nVendor: %.8s\nProduct: %.16s\n", inq_data+8, inq_data+16);
     }
     close(fd_mega);
     return 0;

@@ -73,57 +73,72 @@ int send_cmd(int fd, int bus, int target, u8 *cdb, int cdblen, void *data, int l
 }
 
 int main(int argc, char *argv[]) {
-    int fd_dev, fd_mega, bus_no, target;
+    int fd_dev, fd_mega, bus_no = 0, target;
     u8 inq_data[96];
     
-    u8 format_param[12] = {
-        0x00, 0x00, 0x00, 0x08,
-        0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x02, 0x00
-    };
-    
+    /* FORMAT UNIT short parameter list header (FMTDATA=1, LONGLIST=0).
+       byte 0: PROTECTION FIELD USAGE = 0
+       byte 1: FOV=0 (use drive defaults), IMMED=0
+       bytes 2-3: DEFECT LIST LENGTH = 0 (we supply no defect descriptors)
+
+       This used to be a 12-byte MODE SELECT block descriptor, which the drive
+       parsed as "defect list length = 8" followed by two short-block defect
+       descriptors - silently adding LBA 0 and LBA 512 to the grown defect list
+       on every run. FORMAT UNIT has no block-size field; the sector size comes
+       from a preceding MODE SELECT (see mega_modesel.c / mega_format_immed.c). */
+    u8 format_param[4] = {0x00, 0x00, 0x00, 0x00};
+
     u8 inq_cdb[6] = {0x12, 0, 0, 0, 96, 0};
     u8 format_cdb[6] = {0x04, 0x10, 0, 0, 0, 0};
     
     if (argc < 3) {
-        printf("MegaRAID Drive Formatter (520->512 byte sectors)\\n");
-        printf("Usage: %s <block_device> <target_id>\\n", argv[0]);
+        printf("MegaRAID Drive Formatter (520->512 byte sectors)\n");
+        printf("Usage: %s <block_device> <target_id>\n", argv[0]);
         return 1;
     }
     target = atoi(argv[2]);
     
     fd_dev = open(argv[1], O_RDWR | O_NONBLOCK);
     if (fd_dev < 0) { perror("open"); return 1; }
-    ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no);
+    if (ioctl(fd_dev, SCSI_IOCTL_GET_BUS_NUMBER, &bus_no) < 0) {
+        perror("SCSI_IOCTL_GET_BUS_NUMBER");
+        close(fd_dev);
+        return 1;
+    }
     close(fd_dev);
     
     fd_mega = open("/dev/megaraid_sas_ioctl_node", O_RDWR);
     if (fd_mega < 0) { perror("open megaraid"); return 1; }
     
-    printf("Checking target %d on bus %d...\\n", target, bus_no);
+    printf("Checking target %d on bus %d...\n", target, bus_no);
     memset(inq_data, 0, sizeof(inq_data));
     if (send_cmd(fd_mega, bus_no, target, inq_cdb, 6, inq_data, 96, MFI_FRAME_DIR_READ)) {
-        printf("INQUIRY failed - wrong target?\\n");
+        printf("INQUIRY failed - wrong target?\n");
+        close(fd_mega);
         return 1;
     }
-    printf("Found: %.8s %.16s\\n\\n", inq_data+8, inq_data+16);
+    printf("Found: %.8s %.16s\n\n", inq_data+8, inq_data+16);
     
-    printf("*** FORMATTING TO 512-BYTE SECTORS IN 5 SECONDS ***\\n");
-    printf("*** ALL DATA WILL BE DESTROYED - Ctrl+C to abort ***\\n\\n");
+    printf("*** FORMATTING TO 512-BYTE SECTORS IN 5 SECONDS ***\n");
+    printf("*** ALL DATA WILL BE DESTROYED - Ctrl+C to abort ***\n\n");
     for (int i = 5; i > 0; i--) {
-        printf("%d...\\n", i);
+        printf("%d...\n", i);
         sleep(1);
     }
     
-    printf("\\nSending FORMAT UNIT command...\\n");
-    int rc = send_cmd(fd_mega, bus_no, target, format_cdb, 6, format_param, 12, MFI_FRAME_DIR_WRITE);
+    printf("\nSending FORMAT UNIT command...\n");
+    int rc = send_cmd(fd_mega, bus_no, target, format_cdb, 6, format_param, sizeof(format_param), MFI_FRAME_DIR_WRITE);
     
     if (rc == 0) {
-        printf("\\nFORMAT command accepted!\\n");
-        printf("Format in progress - this will take 30-60 minutes.\\n");
-        printf("Monitor with: smartctl -d megaraid,%d -a /dev/sda\\n", target);
+        printf("\nFORMAT command accepted!\n");
+        printf("Format in progress - this will take 30-60 minutes.\n");
+        printf("Monitor with: smartctl -d megaraid,%d -a /dev/sda\n", target);
     } else {
-        printf("\\nFORMAT failed with status: %d\\n", rc);
+        printf("\nFORMAT failed with status: 0x%02x\n", rc);
+        if (rc == 0x45)
+            printf("(0x45 = MFI_STAT_SCSI_IO_FAILED - on a slow HDD this usually means the\n"
+                   " controller timed out a blocking FORMAT UNIT. Use mega_format_immed\n"
+                   " instead, which sets the IMMED bit. See README.)\n");
     }
     
     close(fd_mega);

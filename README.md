@@ -57,6 +57,12 @@ gcc -o mega_format512 mega_format512.c
 ```
 
 **Note:** This worked on Drive 1 (slot 4) - it reported "status 45" failure but actually succeeded!
+See "The IMMED bit" below for why status 45 (`MFI_STAT_SCSI_IO_FAILED`) shows up here.
+
+**Note:** `FORMAT UNIT` has no block-size field - the sector size comes from a
+preceding `MODE SELECT`. This tool only sends `FORMAT UNIT`, so it relies on the
+drive's current mode page. If it leaves the drive at 520, use `mega_modesel` or
+`mega_format_immed`, which set the block size first.
 
 ### 3. `mega_modesel.c` - MODE SELECT + FORMAT Tool
 Uses MODE SELECT to set block size to 512, then FORMAT UNIT to apply. This was needed for Drive 2 (slot 5) where the direct FORMAT UNIT approach didn't work.
@@ -87,15 +93,30 @@ gcc -o mega_format_immed mega_format_immed.c
 ### 6. `mega_progress.c` - FORMAT UNIT progress poller
 Sends REQUEST SENSE and reports background format progress. While a format runs
 the drive answers with sense key `0x2` / ASC `0x04` / ASCQ `0x04`
-("LOGICAL UNIT NOT READY, FORMAT IN PROGRESS") plus a 0-65536 progress value;
-when it's done the drive reports no error.
+("LOGICAL UNIT NOT READY, FORMAT IN PROGRESS") plus a 0-65536 progress value.
+
+Both fixed-format (`0x70`/`0x71`) and descriptor-format (`0x72`/`0x73`) sense
+data are decoded, and the progress bytes are only trusted when the drive sets
+`SKSV`. Once no format is in progress it issues `READ CAPACITY(10)` and reports
+the drive's **actual** block size - completion is not inferred from a sense key
+of `0x0`, which equally means "nothing has happened yet".
 
 **Usage:**
 ```bash
 gcc -o mega_progress mega_progress.c
+
+# report once and exit
 ./mega_progress /dev/sda <target_id>
 # FORMAT IN PROGRESS: 42.0% (27524/65536)
+
+# or poll every 60s until the format finishes
+./mega_progress /dev/sda <target_id> 60
+# ...
+# Drive ready: block size 512 bytes, 3907029168 blocks (2.00 TB)
 ```
+
+Exit status: `0` = ready at 512 bytes (or format still running), `2` = ready but
+not at 512 bytes, `1` = error.
 
 ## The IMMED bit: why a format can "fail", hang, or half-complete
 
@@ -273,8 +294,12 @@ apt-get install build-essential smartmontools sg3-utils lsscsi
 ## Troubleshooting
 
 ### FORMAT command reports failure (status 45) but might have worked
-- Always verify with `smartctl -d megaraid,X -i /dev/sda | grep block`
+- Always verify with `smartctl -d megaraid,X -i /dev/sda | grep block`, or with
+  `./mega_progress /dev/sda <target_id>` which reports the drive's real block size
 - Status 45 (MFI_STAT_SCSI_IO_FAILED) doesn't always mean failure
+- On a **slow HDD** it usually means the controller timed out a blocking
+  `FORMAT UNIT` and the medium is now half-formatted - use `mega_format_immed`
+  instead. See "The IMMED bit" above.
 
 ### smartctl shows 512 bytes but perccli still shows UGUnsp
 - The controller has stale cache

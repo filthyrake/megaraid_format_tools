@@ -29,11 +29,11 @@ struct megasas_iocpacket {
 } __attribute__((packed));
 
 int main() {
-    printf("sizeof(megasas_iocpacket) = %zu (expected 0x194 = 404)\\n", sizeof(struct megasas_iocpacket));
-    printf("sizeof(megasas_pthru_frame) = %zu\\n", sizeof(struct megasas_pthru_frame));
-    printf("sizeof(iovec) = %zu\\n", sizeof(struct iovec));
-    printf("offsetof sgl_off = %zu\\n", offsetof(struct megasas_iocpacket, sgl_off));
-    printf("offsetof frame = %zu\\n", offsetof(struct megasas_iocpacket, frame));
-    printf("offsetof sgl = %zu\\n", offsetof(struct megasas_iocpacket, sgl));
+    printf("sizeof(megasas_iocpacket) = %zu (expected 0x194 = 404)\n", sizeof(struct megasas_iocpacket));
+    printf("sizeof(megasas_pthru_frame) = %zu\n", sizeof(struct megasas_pthru_frame));
+    printf("sizeof(iovec) = %zu\n", sizeof(struct iovec));
+    printf("offsetof sgl_off = %zu\n", offsetof(struct megasas_iocpacket, sgl_off));
+    printf("offsetof frame = %zu\n", offsetof(struct megasas_iocpacket, frame));
+    printf("offsetof sgl = %zu\n", offsetof(struct megasas_iocpacket, sgl));
     return 0;
 }

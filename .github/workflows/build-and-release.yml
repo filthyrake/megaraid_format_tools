@@ -33,15 +33,17 @@ jobs:
         gcc -O2 -Wall -Wextra -o mega_inquiry mega_inquiry.c
         gcc -O2 -Wall -Wextra -o mega_format512 mega_format512.c
         gcc -O2 -Wall -Wextra -o mega_modesel mega_modesel.c
+        gcc -O2 -Wall -Wextra -o mega_format_immed mega_format_immed.c
+        gcc -O2 -Wall -Wextra -o mega_progress mega_progress.c
         gcc -O2 -Wall -Wextra -o check_size check_size.c
     
     - name: Test binaries exist
       run: |
-        ls -lh mega_inquiry mega_format512 mega_modesel check_size
+        ls -lh mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size
     
     - name: Create build artifacts archive
       run: |
-        tar -czf megaraid-tools-linux-x86_64.tar.gz mega_inquiry mega_format512 mega_modesel check_size README.md LICENSE
+        tar -czf megaraid-tools-linux-x86_64.tar.gz mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size README.md LICENSE
     
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
@@ -51,6 +53,8 @@ jobs:
           mega_inquiry
           mega_format512
           mega_modesel
+          mega_format_immed
+          mega_progress
           check_size
           megaraid-tools-linux-x86_64.tar.gz
     
@@ -79,6 +83,8 @@ jobs:
           mega_inquiry
           mega_format512
           mega_modesel
+          mega_format_immed
+          mega_progress
           check_size
         body: |
           ## MegaRAID Format Tools Release
@@ -89,11 +95,13 @@ jobs:
           - `mega_inquiry` - Drive identification tool
           - `mega_format512` - FORMAT UNIT tool
           - `mega_modesel` - MODE SELECT + FORMAT tool
+          - `mega_format_immed` - MODE SELECT + FORMAT UNIT with IMMED (background format; reliable on slow HDDs)
+          - `mega_progress` - Poll background FORMAT UNIT progress
           - `check_size` - Structure validation tool
           
           ### Usage:
           Download the individual tools or the tar.gz archive containing all tools.
-          Make the tools executable: `chmod +x mega_inquiry mega_format512 mega_modesel check_size`
+          Make the tools executable: `chmod +x mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size`
           
           See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md) for detailed usage instructions.
         draft: false
