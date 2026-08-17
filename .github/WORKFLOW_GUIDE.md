@@ -7,8 +7,9 @@ This repository includes an automated build and release workflow using GitHub Ac
 The `build-and-release.yml` workflow automatically:
 
 1. **Builds** all C tools on every push to main/master and on pull requests
-2. **Creates releases** when you push a version tag (e.g., `v1.0.0`)
-3. **Uploads binaries** to the release as downloadable assets
+2. **Runs the sense-parser tests, a no-args smoke test, and an ioctl struct-divergence check**
+3. **Creates releases** when you push a version tag (e.g., `v1.0.0`)
+4. **Uploads binaries** to the release as downloadable assets
 
 ## What Gets Built
 
@@ -56,9 +57,9 @@ No additional setup or secrets are required.
 
 ## Workflow Triggers
 
-- **Push to main/master:** Builds tools, uploads artifacts
-- **Pull requests:** Builds tools to verify changes
-- **Version tags (v*):** Builds tools + creates GitHub release
+- **Push to main/master:** Builds and tests tools, uploads artifacts
+- **Pull requests:** Builds and tests tools to verify changes
+- **Version tags (v*):** Builds and tests tools + creates GitHub release
 
 ## Local Testing
 
@@ -78,6 +79,14 @@ gcc -O2 -Wall -Wextra -o check_size check_size.c
 
 # Verify binaries
 ls -lh mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress check_size
+
+# Run the sense-parser tests (CI runs these too)
+sh run_tests.sh
+
+# Smoke test: every tool must exit 1 and print usage with no arguments
+for t in mega_inquiry mega_format512 mega_modesel mega_format_immed mega_progress; do
+    ./"$t" >/dev/null 2>&1 && { echo "FAIL: $t exited 0"; break; }
+done
 
 # Create tarball
 tar -czf megaraid-tools-linux-x86_64.tar.gz \
