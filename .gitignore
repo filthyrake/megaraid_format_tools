@@ -27,3 +27,4 @@ mega_final
 parse_sense.inc
 test_parse_sense
 test_parse_sense_asan
+*.dSYM/
